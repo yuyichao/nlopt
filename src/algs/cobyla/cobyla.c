@@ -43,6 +43,7 @@
 #include <math.h>
 
 #include "cobyla.h"
+#include "nlopt-blas.h"
 
 /* SGJ, 2008: modified COBYLA code to take explicit account of bound
    constraints.  Since bound constraints are linear, these should
@@ -402,7 +403,8 @@ nlopt_result cobyla(int n, int m, double *x, double *minf, double rhobeg, double
   }
 
   /* workspace allocation */
-  w = (double*) malloc(U(n*(3*n+2*m+11)+4*m+6)*sizeof(*w));
+  /* the last n*(m+1) elements are only used for the gradients with BLAS */
+  w = (double*) malloc(U(n*(3*n+2*m+11)+4*m+6 + n*(m+1))*sizeof(*w));
   if (w == NULL)
   {
     if (iprint>=1) fprintf(stderr, "cobyla: memory allocation error.\n");
@@ -495,6 +497,10 @@ static nlopt_result cobylb(int *n, int *m, int *mpp,
 /* hold the displacements from the optimal vertex to the other vertices. */
 /* Further, SIMI holds the inverse of the matrix that is contained in the */
 /* first N columns of SIM. */
+
+#ifdef NLOPT_HAVE_BLAS
+  (void) i__3; /* only used by the loops replaced by BLAS calls */
+#endif
 
   /* Parameter adjustments */
   a_dim1 = *n;
@@ -735,6 +741,20 @@ L140:
 /* Make an error return if SIGI is a poor approximation to the inverse of */
 /* the leading N by N submatrix of SIG. */
 
+#ifdef NLOPT_HAVE_BLAS
+  /* SIMI*SIM - I in W (N*N elements are free here); the maximum is taken
+     below in the original order. */
+  {
+    blas_int nn = *n;
+    double one = 1., zero = 0.;
+    NLOPT_BLAS(dgemm)("N", "N", &nn, &nn, &nn, &one, &simi[simi_offset], &nn,
+                      &sim[sim_offset], &nn, &zero, &w[1], &nn);
+    i__1 = *n;
+    for (j = 1; j <= i__1; ++j) {
+      w[j + (j - 1) * *n] += -1.;
+    }
+  }
+#else
   /* SIMI*SIM - I is formed column by column in W (N*N
      elements are free here), accumulating each element over k in the same
      order as an inner product would, but along the columns of SIMI; the
@@ -757,6 +777,7 @@ L140:
       }
     }
   }
+#endif
   error = 0.;
   i__1 = *n;
   for (i__ = 1; i__ <= i__1; ++i__) {
@@ -779,6 +800,28 @@ L140:
 /* after the constraint gradients in the array A. The vector W is used for */
 /* working space. */
 
+#ifdef NLOPT_HAVE_BLAS
+  /* A = SIMI^T W, where column K of W (N*(M+1) elements, after the N*N + 3*N
+     used above) is DATMAT(K,1:N) + CON(K); then negate the objective's. */
+  {
+    blas_int nn = *n, nmp = mp;
+    double one = 1., zero = 0.;
+    double *wk = &w[*n * *n + 3 * *n + 1];
+    for (k = 1; k <= mp; ++k) {
+      con[k] = -datmat[k + np * datmat_dim1];
+      i__1 = *n;
+      for (j = 1; j <= i__1; ++j) {
+        wk[(j - 1) + (k - 1) * *n] = datmat[k + j * datmat_dim1] + con[k];
+      }
+    }
+    NLOPT_BLAS(dgemm)("T", "N", &nn, &nmp, &nn, &one, &simi[simi_offset], &nn,
+                      wk, &nn, &zero, &a[a_offset], &nn);
+    i__1 = *n;
+    for (i__ = 1; i__ <= i__1; ++i__) {
+      a[i__ + mp * a_dim1] = -a[i__ + mp * a_dim1];
+    }
+  }
+#else
   /* Four functions at a time (W holds four rows of N; N*N + 3*N elements
      are free here), so that each column of SIMI is read once per four rows,
      with each inner product accumulated in the same order. */
@@ -848,6 +891,7 @@ L140:
       }
     }
   }
+#endif
 
 /* Calculate the values of sigma and eta, and set IFLAG=0 if the current */
 /* simplex is not acceptable. */

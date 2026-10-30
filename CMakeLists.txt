@@ -144,8 +144,8 @@ if (_blas_candidates)
   foreach (_suffix IN LISTS _blas_suffixes)
     set (_decls)
     set (_calls)
-    foreach (_r daxpy dscal dnrm2 ddot dgemv dtpmv dtpsv dtrsm dtrsv dgelsy dgeqr2 dgerq2
-                dlaic1 dlarf dlarfgp dlartgp dorm2r dormr2)
+    foreach (_r daxpy dscal dnrm2 ddot dgemv dgemm dtpmv dtpsv dtrsm dtrsv dgelsy dgeqr2
+                dgerq2 dlaic1 dlarf dlarfgp dlartgp dorm2r dormr2)
       string (APPEND _decls "char ${_r}${_suffix}(void);\n")
       string (APPEND _calls "  ${_r}${_suffix}();\n")
     endforeach ()
