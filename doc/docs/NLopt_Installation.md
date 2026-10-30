@@ -181,7 +181,7 @@ The resulting library has the *same* interface as the ordinary NLopt library, an
 BLAS/LAPACK
 -----------
 
-Some algorithms use BLAS/LAPACK for their dense linear algebra if a library is found at configure time, and otherwise fall back to built-in implementations of the few routines they need. This is controlled by the `NLOPT_BLAS` option:
+Several algorithms use BLAS/LAPACK for their dense linear algebra if a library is found at configure time: SLSQP, MMA and CCSAQ, COBYLA, the Luksan algorithms (L-BFGS, the variable-metric and the truncated-Newton methods), and NEWUOA and BOBYQA (for 100 or more variables). Without one, SLSQP falls back to built-in implementations of the few routines it needs, and the other algorithms to their own loops. This is controlled by the `NLOPT_BLAS` option:
 
 ```sh
 cmake -DNLOPT_BLAS=AUTO ..       # default: use BLAS/LAPACK if found
