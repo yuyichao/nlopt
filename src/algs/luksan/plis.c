@@ -126,6 +126,10 @@ static void plis_(int *nf, int *nb, double *x, int *
     int kd, ld;
     double fo, fp, po, pp, ro, rp;
     int kbf, mfg;
+    /* The stored pairs are a circular buffer: logical slot 1 (the newest)
+       is physical slot HEAD, instead of shifting all pairs each iteration
+       (MXDRSU); the arithmetic is the same. */
+    int head = 0, k1, k2;
     int mes, kit;
     double alf1, alf2, eta9, par1, par2;
     double eps8, eps9;
@@ -293,27 +297,37 @@ L11130:
 
 /*     DETERMINATION OF THE PARAMETER B */
 
-    b = luksan_mxudot__(nf, &xo[1], &go[1], &ix[1], &kbf);
+    b = luksan_mxudot__(nf, &xo[1 + head * *nf], &go[1 + head * *nf], &ix[1], &kbf);
     if (b <= 0.) {
 	irest = MAX2(irest,1);
 	goto L12620;
     }
-    uo[1] = 1. / b;
+    uo[1 + head] = 1. / b;
     luksan_mxuneg__(nf, &gf[1], &s[1], &ix[1], &kbf);
-    luksan_mxdrcb__(nf, &k, &xo[1], &go[1], &uo[1], &vo[1], &s[1], &ix[1], &
-	    kbf);
-    a = luksan_mxudot__(nf, &go[1], &go[1], &ix[1], &kbf);
+    k1 = MIN2(k, *mf - head);
+    k2 = k - k1;
+    luksan_mxdrcb__(nf, &k1, &xo[1 + head * *nf], &go[1 + head * *nf], &uo[1 + head],
+	    &vo[1 + head], &s[1], &ix[1], &kbf);
+    if (k2 > 0) {
+	luksan_mxdrcb__(nf, &k2, &xo[1], &go[1], &uo[1], &vo[1], &s[1], &ix[1], &
+		kbf);
+    }
+    a = luksan_mxudot__(nf, &go[1 + head * *nf], &go[1 + head * *nf], &ix[1], &kbf);
     if (a > 0.) {
 	d__1 = b / a;
 	luksan_mxvscl__(nf, &d__1, &s[1], &s[1]);
     }
-    luksan_mxdrcf__(nf, &k, &xo[1], &go[1], &uo[1], &vo[1], &s[1], &ix[1], &
-	    kbf);
+    if (k2 > 0) {
+	luksan_mxdrcf__(nf, &k2, &xo[1], &go[1], &uo[1], &vo[1], &s[1], &ix[1], &
+		kbf);
+    }
+    luksan_mxdrcf__(nf, &k1, &xo[1 + head * *nf], &go[1 + head * *nf], &uo[1 + head],
+	    &vo[1 + head], &s[1], &ix[1], &kbf);
     snorm = sqrt(luksan_mxudot__(nf, &s[1], &s[1], &ix[1], &kbf));
 /* Computing MIN */
     i__1 = k + 1;
     k = MIN2(i__1,*mf);
-    luksan_mxdrsu__(nf, &k, &xo[1], &go[1], &uo[1]);
+    head = (head + *mf - 1) % *mf;
 L12620:
     iterd = 0;
     if (irest != 0) {
@@ -372,8 +386,8 @@ L12620:
     if (irest != 0) {
 	goto L11130;
     }
-    luksan_pytrcs__(nf, &x[1], &ix[1], &xo[1], &xl[1], &xu[1], &gf[1], &go[1],
-	     &s[1], &ro, &fp, &fo, f, &po, &p, &rmax, &eta9, &kbf);
+    luksan_pytrcs__(nf, &x[1], &ix[1], &xo[1 + head * *nf], &xl[1], &xu[1], &gf[1],
+	     &go[1 + head * *nf], &s[1], &ro, &fp, &fo, f, &po, &p, &rmax, &eta9, &kbf);
     if (rmax == 0.) {
 	goto L11175;
     }
@@ -385,7 +399,7 @@ L11170:
     if (isys == 0) {
 	goto L11174;
     }
-    luksan_mxudir__(nf, &r__, &s[1], &xo[1], &x[1], &ix[1], &kbf);
+    luksan_mxudir__(nf, &r__, &s[1], &xo[1 + head * *nf], &x[1], &ix[1], &kbf);
     luksan_pcbs04__(nf, &x[1], &ix[1], &xl[1], &xu[1], &eps9, &kbf);
     *f = objgrad(*nf, &x[1], &gf[1], objgrad_data);
     ++*(stop->nevals_p);
@@ -397,15 +411,15 @@ L11174:
 	r__ = 0.;
 	*f = fo;
 	p = po;
-	luksan_mxvcop__(nf, &xo[1], &x[1]);
-	luksan_mxvcop__(nf, &go[1], &gf[1]);
+	luksan_mxvcop__(nf, &xo[1 + head * *nf], &x[1]);
+	luksan_mxvcop__(nf, &go[1 + head * *nf], &gf[1]);
 	irest = MAX2(irest,1);
 	ld = kd;
 	goto L11130;
     }
-    luksan_pytrcd__(nf, &x[1], &ix[1], &xo[1], &gf[1], &go[1], &r__, f, &fo, &
-	    p, &po, &dmax__, &kbf, &kd, &ld, &iters);
-    xstop = nlopt_stop_dx(stop, &x[1], &xo[1]);
+    luksan_pytrcd__(nf, &x[1], &ix[1], &xo[1 + head * *nf], &gf[1], &go[1 + head * *nf],
+	    &r__, f, &fo, &p, &po, &dmax__, &kbf, &kd, &ld, &iters);
+    xstop = nlopt_stop_dx(stop, &x[1], &xo[1 + head * *nf]);
 L11175:
     if (kbf > 0) {
 	luksan_mxvine__(nf, &ix[1]);
