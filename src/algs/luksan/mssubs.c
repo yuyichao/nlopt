@@ -470,11 +470,29 @@ void luksan_mxdrmm__(int *n, int *m, double *a,
     --a;
 
     /* Function Body */
+    /* Four columns at a time, so that X is read once per four columns; each
+       inner product is accumulated in the same order as one at a time. */
     k = 0;
     i__1 = *m;
-    for (j = 1; j <= i__1; ++j) {
+    i__2 = *n;
+    for (j = 1; j + 3 <= i__1; j += 4) {
+	const double *a0 = &a[k], *a1 = a0 + *n, *a2 = a1 + *n, *a3 = a2 + *n;
+	double t0 = 0., t1 = 0., t2 = 0., t3 = 0.;
+	for (i__ = 1; i__ <= i__2; ++i__) {
+	    double xi = x[i__];
+	    t0 += a0[i__] * xi;
+	    t1 += a1[i__] * xi;
+	    t2 += a2[i__] * xi;
+	    t3 += a3[i__] * xi;
+	}
+	y[j] = t0;
+	y[j + 1] = t1;
+	y[j + 2] = t2;
+	y[j + 3] = t3;
+	k += *n << 2;
+    }
+    for (; j <= i__1; ++j) {
 	temp = 0.;
-	i__2 = *n;
 	for (i__ = 1; i__ <= i__2; ++i__) {
 	    temp += a[k + i__] * x[i__];
 /* L1: */
