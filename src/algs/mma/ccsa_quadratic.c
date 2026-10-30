@@ -44,6 +44,7 @@
 
 #include "mma.h"
 #include "nlopt-util.h"
+#include "nlopt-blas.h"
 
 unsigned ccsa_verbose = 0; /* > 0 for verbose output */
 
@@ -109,12 +110,21 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 	  u += rhoc[i] * y[i];
      for (j = 0; j < n; ++j)
 	  v[j] = dfdx[j];
+#ifdef NLOPT_HAVE_BLAS
+     if (m > 0 && n > 0) {
+	  /* v += dfcdx^T y, dfcdx being the n-by-m column-major matrix */
+	  blas_int nn = n, mm = m, one = 1;
+	  double d1 = 1.;
+	  NLOPT_BLAS(dgemv)("N", &nn, &mm, &d1, dfcdx, &nn, y, &one, &d1, v, &one);
+     }
+#else
      for (i = 0; i < m; ++i) {
 	  const double *dfcdxi = dfcdx + i*n;
 	  double yi = y[i];
 	  for (j = 0; j < n; ++j)
 	       v[j] += dfcdxi[j] * yi;
      }
+#endif
 
      for (j = 0; j < n; ++j) {
 	  double dx, sigma2, dx2, dx2sig;
@@ -155,6 +165,17 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
      }
 
      /* update gcval, row by row of dfcdx as above */
+#ifdef NLOPT_HAVE_BLAS
+     if (!any_fixed && m > 0 && n > 0) {
+	  /* gcval += dfcdx dx + rhoc * sum(dx2sig), where sum(dx2sig) = wval */
+	  blas_int nn = n, mm = m, one = 1;
+	  double d1 = 1.;
+	  for (i = 0; i < m; ++i)
+	       gcval[i] += rhoc[i] * d->wval;
+	  NLOPT_BLAS(dgemv)("T", &nn, &mm, &d1, dfcdx, &nn, dxs, &one, &d1, gcval, &one);
+     }
+     else
+#endif
      for (i = 0; i < m; ++i) {
 	  const double *dfcdxi = dfcdx + i*n;
 	  double rhoci = rhoc[i], gc = gcval[i];

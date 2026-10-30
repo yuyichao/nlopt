@@ -27,6 +27,7 @@
 
 #include "mma.h"
 #include "nlopt-util.h"
+#include "nlopt-blas.h"
 
 unsigned mma_verbose = 0; /* > 0 for verbose output */
 
@@ -53,9 +54,30 @@ typedef struct {
      double *xcur; /* array of length n, output each time */
      double gval, wval, *gcval; /* output each time (array length m) */
      double *work; /* length 5*n */
+#ifdef NLOPT_HAVE_BLAS
+     double *dfcdx_abs; /* |dfcdx|, rows of NaN constraints zeroed in both */
+#endif
 } dual_data;
 
 static double sqr(double x) { return x * x; }
+
+#ifdef NLOPT_HAVE_BLAS
+/* Set dfcdx_abs = |dfcdx|, and zero the rows of both for NaN constraints
+   (which are inactive, and whose gradients are otherwise unused), so that
+   the dual function can use matrix-vector products over all rows. */
+static void update_dfcdx_abs(unsigned m, unsigned n, const double *fcval,
+			     double *dfcdx, double *dfcdx_abs)
+{
+     unsigned i, j;
+     for (i = 0; i < m; ++i) {
+	  double *row = dfcdx + i*n, *arow = dfcdx_abs + i*n;
+	  if (nlopt_isnan(fcval[i]))
+	       for (j = 0; j < n; ++j) row[j] = arow[j] = 0;
+	  else
+	       for (j = 0; j < n; ++j) arow[j] = fabs(row[j]);
+     }
+}
+#endif
 
 static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 {
@@ -87,6 +109,20 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 	  u[j] = dfdx[j];
 	  v[j] = fabs(dfdx[j]) * sigma[j] + 0.5 * rho;
      }
+#ifdef NLOPT_HAVE_BLAS
+     if (m > 0 && n > 0) {
+	  /* u += dfcdx^T y and v += sigma .* (|dfcdx|^T y) + sum(rhoc .* y)/2,
+	     the rows of NaN constraints being zero; cs is scratch here */
+	  blas_int nn = n, mm = m, one = 1;
+	  double d1 = 1., d0 = 0., rhocy = 0;
+	  for (i = 0; i < m; ++i)
+	       if (!nlopt_isnan(fcval[i])) rhocy += rhoc[i] * y[i];
+	  NLOPT_BLAS(dgemv)("N", &nn, &mm, &d1, dfcdx, &nn, y, &one, &d1, u, &one);
+	  NLOPT_BLAS(dgemv)("N", &nn, &mm, &d1, d->dfcdx_abs, &nn, y, &one, &d0, cs, &one);
+	  for (j = 0; j < n; ++j)
+	       v[j] += sigma[j] * cs[j] + 0.5 * rhocy;
+     }
+#else
      for (i = 0; i < m; ++i) if (!nlopt_isnan(fcval[i])) {
 	  const double *dfcdxi = dfcdx + i*n;
 	  double yi = y[i], rhoci = 0.5 * rhoc[i];
@@ -95,6 +131,7 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 	       v[j] += (fabs(dfcdxi[j]) * sigma[j] + rhoci) * yi;
 	  }
      }
+#endif
 
      for (j = 0; j < n; ++j) {
 	  double uj, vj, dx, denominv, c, sigma2, dx2;
@@ -144,6 +181,25 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
      }
 
      /* update gcval, row by row of dfcdx as above */
+#ifdef NLOPT_HAVE_BLAS
+     if (!any_fixed && m > 0 && n > 0) {
+	  /* gcval += dfcdx (c .* denominv) + |dfcdx| (sigma .* dx2 .* denominv)
+	     + rhoc * sum(dx2 .* denominv)/2, where the last sum is wval */
+	  blas_int nn = n, mm = m, one = 1;
+	  double d1 = 1.;
+	  for (j = 0; j < n; ++j) {
+	       cs[j] *= denominvs[j];
+	       dx2s[j] *= sigma[j] * denominvs[j];
+	  }
+	  for (i = 0; i < m; ++i)
+	       gcval[i] += rhoc[i] * d->wval;
+	  NLOPT_BLAS(dgemv)("T", &nn, &mm, &d1, dfcdx, &nn, cs, &one, &d1, gcval, &one);
+	  NLOPT_BLAS(dgemv)("T", &nn, &mm, &d1, d->dfcdx_abs, &nn, dx2s, &one, &d1, gcval, &one);
+	  for (i = 0; i < m; ++i)
+	       if (nlopt_isnan(fcval[i])) gcval[i] = 0;
+     }
+     else
+#endif
      for (i = 0; i < m; ++i) if (!nlopt_isnan(fcval[i])) {
 	  const double *dfcdxi = dfcdx + i*n;
 	  double rhoci = 0.5*rhoc[i], gc = gcval[i];
@@ -201,7 +257,11 @@ nlopt_result mma_minimize(unsigned n, nlopt_func f, void *f_data,
                         nlopt_get_dimension(dual_opt), m);
          return NLOPT_INVALID_ARGS;
      }
+#ifdef NLOPT_HAVE_BLAS
+     sigma = (double *) malloc(sizeof(double) * (11*n + 3*m*n + m*7));
+#else
      sigma = (double *) malloc(sizeof(double) * (11*n + 2*m*n + m*7));
+#endif
      if (!sigma) return NLOPT_OUT_OF_MEMORY;
      dfdx = sigma + n;
      dfdx_cur = dfdx + n;
@@ -218,6 +278,9 @@ nlopt_result mma_minimize(unsigned n, nlopt_func f, void *f_data,
      dfcdx = y + m;
      dfcdx_cur = dfcdx + m*n;
      dd.work = dfcdx_cur + m*n;
+#ifdef NLOPT_HAVE_BLAS
+     dd.dfcdx_abs = dd.work + 5*n;
+#endif
 
      dd.n = n;
      dd.x = x;
@@ -277,6 +340,9 @@ nlopt_result mma_minimize(unsigned n, nlopt_func f, void *f_data,
      if (!feasible)
 	  for (i = 0; i < m; ++i) dual_ub[i] = 1e40;
 
+#ifdef NLOPT_HAVE_BLAS
+     update_dfcdx_abs(m, n, fcval, dfcdx, dd.dfcdx_abs);
+#endif
      nlopt_set_min_objective(dual_opt, dual_func, &dd);
      nlopt_set_lower_bounds(dual_opt, dual_lb);
      nlopt_set_upper_bounds(dual_opt, dual_ub);
@@ -407,6 +473,9 @@ nlopt_result mma_minimize(unsigned n, nlopt_func f, void *f_data,
 		    memcpy(x, xcur, sizeof(double)*n);
 		    memcpy(dfdx, dfdx_cur, sizeof(double)*n);
 		    memcpy(dfcdx, dfcdx_cur, sizeof(double)*n*m);
+#ifdef NLOPT_HAVE_BLAS
+		    update_dfcdx_abs(m, n, fcval, dfcdx, dd.dfcdx_abs);
+#endif
 
 		    /* once we have reached a feasible solution, the
 		       algorithm should never make the solution infeasible
