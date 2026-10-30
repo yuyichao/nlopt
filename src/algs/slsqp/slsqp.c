@@ -10,6 +10,7 @@
    translation (bound clamping, non-finite line-search steps, no iteration limit,
    gradient at the first line-search trial point) were carried over. */
 
+#include <assert.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -945,6 +946,89 @@ lsq(
 
 
 /*
+ * Least squares problem min |A*x - b| for an A that is upper triangular (zero
+ * below the diagonal), as the LSQ matrix is when there are no equality
+ * constraints.  DGELSY with all columns fixed leaves such an A unchanged in its
+ * QR factorization (every reflector is the identity), but still spends O(m*n^2)
+ * on it, and LAPACK's blocked QR does not skip the zeros.  This does the
+ * remaining steps of DGELSY directly, with the same rank estimation and the same
+ * triangular solve, so the result is the same.  Returns 0 without modifying b
+ * if DGELSY would rescale A or b, or if A is rank deficient (for the
+ * minimum-norm solution); the caller then calls DGELSY.
+ *
+ * A is (m x n) with leading dimension m, b is (m), work is at least 2*n.  Only
+ * the upper triangle of A is read (the rest is checked in debug builds).
+ */
+static int
+lsq_triangular(blas_int m, blas_int n, const double* restrict a, double* restrict b,
+               double rcond, blas_int* rank, double* restrict work)
+{
+    // DGELSY's scaling thresholds: DLAMCH('S')/DLAMCH('P') and its inverse.
+    const double smlnum = 2.2250738585072014e-308/2.220446049250313e-16;
+    const double bignum = 1.0/smlnum;
+    blas_int one = 1, imax = 1, imin = 2;
+    double anrm = 0.0, bnrm = 0.0, smax, smin, done = 1.0;
+    double* restrict xmin = work;
+    double* restrict xmax = &work[n];
+
+    if ((m < n) || (n == 0)) { return 0; }
+#ifndef NDEBUG
+    for (blas_int j = 0; j < n; j++)
+    {
+        for (blas_int i = j + 1; i < m; i++) { assert(a[i + j*m] == 0.0); }
+    }
+#endif
+    for (blas_int j = 0; j < n; j++)
+    {
+        for (blas_int i = 0; i <= j; i++)
+        {
+            double v = fabs(a[i + j*m]);
+            if (!(v <= bignum)) { return 0; }
+            if (v > anrm) { anrm = v; }
+        }
+    }
+    if (anrm < smlnum) { return 0; }
+    for (blas_int i = 0; i < m; i++)
+    {
+        double v = fabs(b[i]);
+        if (!(v <= bignum)) { return 0; }
+        if (v > bnrm) { bnrm = v; }
+    }
+    if ((bnrm > 0.0) && (bnrm < smlnum)) { return 0; }
+
+    // Incremental condition estimation, as in DGELSY.
+    smax = fabs(a[0]);
+    smin = smax;
+    if (smax == 0.0) { return 0; }
+    xmin[0] = 1.0;
+    xmax[0] = 1.0;
+    *rank = 1;
+    while (*rank < n)
+    {
+        blas_int i = *rank;
+        double sminpr, smaxpr, s1, c1, s2, c2;
+        NLOPT_BLAS(dlaic1)(&imin, &i, xmin, &smin, &a[i*m], &a[i + i*m], &sminpr, &s1, &c1);
+        NLOPT_BLAS(dlaic1)(&imax, &i, xmax, &smax, &a[i*m], &a[i + i*m], &smaxpr, &s2, &c2);
+        if (!(smaxpr*rcond <= sminpr)) { return 0; }
+        for (blas_int k = 0; k < i; k++)
+        {
+            xmin[k] *= s1;
+            xmax[k] *= s2;
+        }
+        xmin[i] = c1;
+        xmax[i] = c2;
+        smin = sminpr;
+        smax = smaxpr;
+        (*rank)++;
+    }
+
+    // Q^T*b = b, solve R*x = b.
+    NLOPT_BLAS(dtrsm)("L", "U", "N", "N", &n, &one, &done, a, &m, b, &m);
+    return 1;
+}
+
+
+/*
  * Solve equality and inequality constrained least squares problem (LSEI)
  *      min |A*x - b|, subject to E*x = f, G*x >= h.
  *
@@ -1058,14 +1142,22 @@ lsei(blas_int ma, blas_int me, blas_int mg, blas_int n,
         double* restrict wb_orig = &lsi_scratch[lwork];
         for (int64_t i = 0; i < ma; i++) { wb_orig[i] = wb[i]; }
 
-        // Mark all columns as fixed so that dgelsy uses the (blocked) QR
-        // without column pivoting, which is about twice as fast here. scipy
-        // gets the same behavior implicitly, except on the first call, since
-        // jw still holds the permutation from the previous call.
-        for (int64_t i = 0; i < nvars; i++) { jw[i] = 1; }
         blas_int krank = 0;
         t = sqrt(epsmach);
-        NLOPT_BLAS(dgelsy)(&ma, &nvars, &one, a2, &ma, wb, &ma, jw, &t, &krank, lsi_scratch, &lwork, &info);
+        // Without equality constraints A is still the upper triangular LSQ
+        // matrix (built by lsq; the RQ transformation above is empty).
+        if ((me == 0) && lsq_triangular(ma, nvars, a2, wb, t, &krank, lsi_scratch))
+        {
+            // Same result as dgelsy below, including the permutation.
+            for (int64_t i = 0; i < nvars; i++) { jw[i] = i + 1; }
+        } else {
+            // Mark all columns as fixed so that dgelsy uses the (blocked) QR
+            // without column pivoting, which is about twice as fast here. scipy
+            // gets the same behavior implicitly, except on the first call, since
+            // jw still holds the permutation from the previous call.
+            for (int64_t i = 0; i < nvars; i++) { jw[i] = 1; }
+            NLOPT_BLAS(dgelsy)(&ma, &nvars, &one, a2, &ma, wb, &ma, jw, &t, &krank, lsi_scratch, &lwork, &info);
+        }
 
         // Copy the solution to x
         for (int64_t i = 0; i < nvars; i++) { x[i] = wb[i]; }

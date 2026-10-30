@@ -57,7 +57,12 @@ backing off from non-finite trial points, no iteration limit) and two
 further changes: unbounded variables are passed to the subproblem as
 NaN bounds, as SciPy does, and the least-squares solve without
 inequality constraints marks all columns as fixed for DGELSY
-explicitly instead of relying on leftover workspace contents.
+explicitly instead of relying on leftover workspace contents.  When that
+least-squares matrix is already upper triangular (no equality
+constraints), DGELSY's O(n^3) QR factorization, whose reflectors are all
+the identity, is skipped: the rank estimate (DLAIC1) and triangular solve
+of DGELSY are done directly, with bit-identical results, and DGELSY is
+still used whenever it would rescale or the matrix is rank deficient.
 
 The BLAS/LAPACK library is chosen at configure time with the CMake
 option NLOPT_BLAS: AUTO (default; use one if found), ON (require one),
