@@ -31,6 +31,11 @@
 #include <string.h>
 
 #include "newuoa.h"
+#include "nlopt-blas.h"
+
+/* With an external BLAS, use it for N >= NEWUOA_BLAS_MIN_N only: for smaller
+   N, OpenBLAS's DGEMV made some sizes up to 3x slower than the loops. */
+#define NEWUOA_BLAS_MIN_N 100
 
 #define MIN2(a,b) ((a) <= (b) ? (a) : (b))
 #define MAX2(a,b) ((a) >= (b) ? (a) : (b))
@@ -100,7 +105,8 @@ static nlopt_result trsapp_(int *n, int *npt, double *xopt,
 	double *xpt, double *gq, double *hq, double *pq,
 	double *delta, double *step, double *d__, double *g,
 	double *hd, double *hs, double *crvmin,
-		    const double *xbase, const double *lb, const double *ub)
+		    const double *xbase, const double *lb, const double *ub,
+		    double *hxpt)
 {
     /* System generated locals */
     int xpt_dim1, xpt_offset, i__1, i__2;
@@ -140,6 +146,10 @@ static nlopt_result trsapp_(int *n, int *npt, double *xopt,
 /* should provide a substantial reduction to Q within the trust region. */
 
 /* Initialization, which includes setting HD to H times XOPT. */
+
+#ifndef NLOPT_HAVE_BLAS
+    (void) hxpt; /* only used with BLAS */
+#endif
 
     /* Parameter adjustments */
     xpt_dim1 = *npt;
@@ -446,6 +456,23 @@ L160:
 /* by the value of ITERC. */
 
 L170:
+#ifdef NLOPT_HAVE_BLAS
+    /* HD = XPT^T (PQ .* (XPT D)), with HXPT (length NPT) holding XPT D */
+    if (*n >= NEWUOA_BLAS_MIN_N)
+    {
+	blas_int np_ = *npt, nn = *n, one = 1;
+	double d1 = 1., d0 = 0.;
+	NLOPT_BLAS(dgemv)("N", &np_, &nn, &d1, &xpt[xpt_offset], &np_, &d__[1], &one,
+			  &d0, hxpt, &one);
+	for (k = 0; k < *npt; ++k) {
+	    hxpt[k] *= pq[k + 1];
+	}
+	NLOPT_BLAS(dgemv)("T", &np_, &nn, &d1, &xpt[xpt_offset], &np_, hxpt, &one,
+			  &d0, &hd[1], &one);
+    }
+    else
+#endif
+    { /* the original loops */
     i__1 = *n;
     for (i__ = 1; i__ <= i__1; ++i__) {
 /* L180: */
@@ -465,6 +492,7 @@ L170:
 /* L200: */
 	    hd[i__] += temp * xpt[k + i__ * xpt_dim1];
 	}
+    }
     }
     ih = 0;
     i__2 = *n;
@@ -1588,7 +1616,7 @@ static nlopt_result newuob_(int *n, int *npt, double *x,
 		    double *xbase, double *xopt, double *xnew,
 		    double *xpt, double *fval, double *gq, double *hq,
 		    double *pq, double *bmat, double *zmat, int *ndim,
-		    double *d__, double *vlag, double *w)
+		    double *d__, double *vlag, double *w, double *hxpt)
 {
     /* System generated locals */
     int xpt_dim1, xpt_offset, bmat_dim1, bmat_offset, zmat_dim1,
@@ -1857,7 +1885,7 @@ L100:
     knew = 0;
     rc2 = trsapp_(n, npt, &xopt[1], &xpt[xpt_offset], &gq[1], &hq[1], &pq[1], &
 	    delta, &d__[1], &w[1], &w[np], &w[np + *n], &w[np + (*n << 1)], &
-	    crvmin, &xbase[1], lb, ub);
+	    crvmin, &xbase[1], lb, ub, hxpt);
     if (rc2 < 0) { rc = rc2; goto L530; }
     dsq = zero;
     i__1 = *n;
@@ -1933,6 +1961,24 @@ L120:
 /* L150: */
 		w[i__] = w[*npt + i__] * zmat[i__ + k * zmat_dim1];
 	    }
+#ifdef NLOPT_HAVE_BLAS
+	    /* VLAG = TEMPQ*SUMZ*XOPT + XPT^T W, BMAT(1:NPT,:) += +-ZMAT(:,K) VLAG^T */
+	    if (*n >= NEWUOA_BLAS_MIN_N)
+	    {
+		blas_int np_ = *npt, nn = *n, one = 1, ldb = *ndim;
+		double d1 = 1., sgn = k < idz ? -1. : 1.;
+		i__2 = *n;
+		for (j = 1; j <= i__2; ++j) {
+		    vlag[j] = tempq * sumz * xopt[j];
+		}
+		NLOPT_BLAS(dgemv)("T", &np_, &nn, &d1, &xpt[xpt_offset], &np_, &w[1],
+				  &one, &d1, &vlag[1], &one);
+		NLOPT_BLAS(dger)(&np_, &nn, &sgn, &zmat[1 + k * zmat_dim1], &one,
+				 &vlag[1], &one, &bmat[bmat_offset], &ldb);
+	    }
+	    else
+#endif
+	    { /* the original loops */
 	    i__2 = *n;
 	    for (j = 1; j <= i__2; ++j) {
 		sum = tempq * sumz * xopt[j];
@@ -1951,6 +1997,7 @@ L120:
 		    bmat[i__ + j * bmat_dim1] += sum * zmat[i__ + k *
 			    zmat_dim1];
 		}
+	    }
 	    }
 	    i__1 = *n;
 	    for (i__ = 1; i__ <= i__1; ++i__) {
@@ -2018,6 +2065,52 @@ L120:
 /* Calculate VLAG and BETA for the current choice of D. The first NPT */
 /* components of W_check will be held in W. */
 
+#ifdef NLOPT_HAVE_BLAS
+    if (*n >= NEWUOA_BLAS_MIN_N)
+    {
+	blas_int np_ = *npt, nn = *n, one = 1, ldb = *ndim;
+	double d1 = 1., d0 = 0.;
+	/* W(K) = SUMA, VLAG(K) = SUMB, then W(K) as below and VLAG = BMAT D */
+	NLOPT_BLAS(dgemv)("N", &np_, &nn, &d1, &xpt[xpt_offset], &np_, &d__[1], &one,
+			  &d0, &w[1], &one);
+	NLOPT_BLAS(dgemv)("N", &np_, &nn, &d1, &xpt[xpt_offset], &np_, &xopt[1], &one,
+			  &d0, &vlag[1], &one);
+	i__1 = *npt;
+	for (k = 1; k <= i__1; ++k) {
+	    w[k] *= half * w[k] + vlag[k];
+	}
+	NLOPT_BLAS(dgemv)("N", &np_, &nn, &d1, &bmat[bmat_offset], &ldb, &d__[1], &one,
+			  &d0, &vlag[1], &one);
+	beta = zero;
+	i__1 = nptm;
+	for (k = 1; k <= i__1; ++k) {
+	    sum = NLOPT_BLAS(ddot)(&np_, &zmat[1 + k * zmat_dim1], &one, &w[1], &one);
+	    if (k < idz) {
+		beta += sum * sum;
+		sum = -sum;
+	    } else {
+		beta -= sum * sum;
+	    }
+	    NLOPT_BLAS(daxpy)(&np_, &sum, &zmat[1 + k * zmat_dim1], &one, &vlag[1], &one);
+	}
+	/* VLAG(NPT+J) = BMAT(NPT+J,:) D + W(1:NPT)^T BMAT(1:NPT,J) */
+	NLOPT_BLAS(dgemv)("N", &nn, &nn, &d1, &bmat[*npt + 1 + bmat_dim1], &ldb, &d__[1],
+			  &one, &d0, &vlag[*npt + 1], &one);
+	bsum = zero;
+	dx = zero;
+	i__2 = *n;
+	for (j = 1; j <= i__2; ++j) {
+	    sum = NLOPT_BLAS(ddot)(&np_, &w[1], &one, &bmat[1 + j * bmat_dim1], &one);
+	    bsum += sum * d__[j];
+	    jp = *npt + j;
+	    vlag[jp] += sum;
+	    bsum += vlag[jp] * d__[j];
+	    dx += d__[j] * xopt[j];
+	}
+    }
+    else
+#endif
+    { /* the original loops */
     i__1 = *npt;
     for (k = 1; k <= i__1; ++k) {
 	suma = zero;
@@ -2076,6 +2169,7 @@ L120:
 	bsum += sum * d__[j];
 /* L280: */
 	dx += d__[j] * xopt[j];
+    }
     }
     beta = dx * dx + dsq * (xoptsq + dx + dx + half * dsq) + beta - bsum;
     vlag[kopt] += one;
@@ -2560,7 +2654,8 @@ nlopt_result newuoa(int n, int npt, double *x,
     ivl = id + n;
     iw = ivl + ndim;
 
-    w = (double *) malloc(sizeof(double) * ((npt+13)*(npt+n) + 3*(n*(n+3))/2));
+    /* the last NPT elements are scratch for TRSAPP's Hessian product */
+    w = (double *) malloc(sizeof(double) * ((npt+13)*(npt+n) + 3*(n*(n+3))/2 + npt));
     if (!w) return NLOPT_OUT_OF_MEMORY;
     --w;
 
@@ -2572,7 +2667,8 @@ nlopt_result newuoa(int n, int npt, double *x,
 		  lb, ub, stop, minf, calfun, calfun_data,
 		  &w[ixb], &w[ixo], &w[ixn], &w[ixp], &w[ifv],
 		  &w[igq], &w[ihq], &w[ipq], &w[ibmat], &w[izmat],
-		  &ndim, &w[id], &w[ivl], &w[iw]);
+		  &ndim, &w[id], &w[ivl], &w[iw],
+		  &w[(npt+13)*(npt+n) + 3*(n*(n+3))/2 + 1]);
 
     ++w;
     free(w);

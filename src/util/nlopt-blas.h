@@ -46,6 +46,7 @@ void   NLOPT_BLAS(dormr2)(const char* side, const char* trans, const blas_int* m
 
 /* Used only with an external BLAS, without a built-in version: the
    callers keep their own loops for the built-in case. */
+void   NLOPT_BLAS(dger)(const blas_int* m, const blas_int* n, const double* alpha, const double* x, const blas_int* incx, const double* y, const blas_int* incy, double* a, const blas_int* lda);
 void   NLOPT_BLAS(dgemm)(const char* transa, const char* transb, const blas_int* m, const blas_int* n, const blas_int* k, const double* alpha, const double* a, const blas_int* lda, const double* b, const blas_int* ldb, const double* beta, double* c, const blas_int* ldc);
 #else
 typedef ptrdiff_t blas_int;
