@@ -473,6 +473,11 @@ nlopt_result luksan_plip(int n, nlopt_func f, void *f_data,
 	  xl[i] = lb[i];
 	  xu[i] = ub[i];
      }
+     /* without any bounds, use the unmasked vector operations (the same
+	results, as no component is masked) */
+     nb = 0;
+     for (i = 0; i < n; ++i)
+	  if (ix[i] != 0) { nb = 1; break; }
 
      /* ?  xo does not seem to be initialized in the
 	original Fortran code, but it is used upon
