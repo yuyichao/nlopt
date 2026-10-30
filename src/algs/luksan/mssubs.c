@@ -1,5 +1,6 @@
 #include <math.h>
 #include "luksan.h"
+#include "nlopt-blas.h"
 
 #define MAX2(a,b) ((a) > (b) ? (a) : (b))
 #define iabs(a) ((a) < 0 ? -(a) : (a))
@@ -470,6 +471,18 @@ void luksan_mxdrmm__(int *n, int *m, double *a,
     --a;
 
     /* Function Body */
+#ifdef NLOPT_HAVE_BLAS
+    (void) i__1; (void) i__2; (void) i__; (void) k; (void) temp;
+    {
+	blas_int nn = *n, mm = *m, one = 1;
+	double done = 1., dzero = 0.;
+	if (mm > 0 && nn > 0) {
+	    NLOPT_BLAS(dgemv)("T", &nn, &mm, &done, &a[1], &nn, &x[1], &one, &dzero, &y[1], &one);
+	} else {
+	    for (j = 1; j <= mm; ++j) y[j] = 0.;
+	}
+    }
+#else
     /* Four columns at a time, so that X is read once per four columns; each
        inner product is accumulated in the same order as one at a time. */
     k = 0;
@@ -501,6 +514,7 @@ void luksan_mxdrmm__(int *n, int *m, double *a,
 	k += *n;
 /* L2: */
     }
+#endif
     return;
 } /* luksan_mxdrmm__ */
 
@@ -633,6 +647,13 @@ void luksan_mxudir__(int *n, double *a, double *x,
 
     /* Function Body */
     if (*job == 0) {
+#ifdef NLOPT_HAVE_BLAS
+	if (z__ == y) {
+	    blas_int nn = *n, one = 1;
+	    NLOPT_BLAS(daxpy)(&nn, a, &x[1], &one, &z__[1], &one);
+	    return;
+	}
+#endif
 	i__1 = *n;
 	for (i__ = 1; i__ <= i__1; ++i__) {
 	    z__[i__] = y[i__] + *a * x[i__];
@@ -725,11 +746,16 @@ double luksan_mxudot__(int *n, double *x, double *y, int *ix,
     /* Function Body */
     temp = 0.;
     if (*job == 0) {
+#ifdef NLOPT_HAVE_BLAS
+	blas_int nn = *n, one = 1;
+	temp = NLOPT_BLAS(ddot)(&nn, &x[1], &one, &y[1], &one);
+#else
 	i__1 = *n;
 	for (i__ = 1; i__ <= i__1; ++i__) {
 	    temp += x[i__] * y[i__];
 /* L1: */
 	}
+#endif
     } else if (*job > 0) {
 	i__1 = *n;
 	for (i__ = 1; i__ <= i__1; ++i__) {
