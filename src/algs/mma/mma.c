@@ -52,6 +52,7 @@ typedef struct {
      const double *fcval, *rhoc; /* arrays of length m */
      double *xcur; /* array of length n, output each time */
      double gval, wval, *gcval; /* output each time (array length m) */
+     double *work; /* length 5*n */
 } dual_data;
 
 static double sqr(double x) { return x * x; }
@@ -67,7 +68,9 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
      const double *rhoc = d->rhoc, *fcval = d->fcval;
      double *xcur = d->xcur;
      double *gcval = d->gcval;
+     double *u = d->work, *v = u + n, *cs = v + n, *dx2s = cs + n, *denominvs = dx2s + n;
      unsigned i, j;
+     int any_fixed = 0;
      double val;
 
      d->count++;
@@ -77,14 +80,30 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
      for (i = 0; i < m; ++i)
 	  val += y[i] * (gcval[i] = nlopt_isnan(fcval[i]) ? 0 : fcval[i]);
 
+     /* The sums over the constraints i below run over the rows of the
+	m-by-n array dfcdx, so they are done row by row (along the contiguous
+	dimension) for all j at once, in the same order for each j. */
      for (j = 0; j < n; ++j) {
-	  double u, v, dx, denominv, c, sigma2, dx2;
+	  u[j] = dfdx[j];
+	  v[j] = fabs(dfdx[j]) * sigma[j] + 0.5 * rho;
+     }
+     for (i = 0; i < m; ++i) if (!nlopt_isnan(fcval[i])) {
+	  const double *dfcdxi = dfcdx + i*n;
+	  double yi = y[i], rhoci = 0.5 * rhoc[i];
+	  for (j = 0; j < n; ++j) {
+	       u[j] += dfcdxi[j] * yi;
+	       v[j] += (fabs(dfcdxi[j]) * sigma[j] + rhoci) * yi;
+	  }
+     }
+
+     for (j = 0; j < n; ++j) {
+	  double uj, vj, dx, denominv, c, sigma2, dx2;
 
 	  /* first, compute xcur[j] for y.  Because this objective is
 	     separable, we can minimize over x analytically, and the minimum
 	     dx is given by the solution of a quadratic equation:
 	             u dx^2 + 2 v sigma^2 dx + u sigma^2 = 0
-	     where u and v are defined by the sums below.  Because of
+	     where u and v are defined by the sums above.  Because of
 	     the definitions, it is guaranteed that |u/v| <= sigma,
 	     and it follows that the only dx solution with |dx| <= sigma
 	     is given by:
@@ -95,17 +114,13 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 
 	  if (sigma[j] == 0) { /* special case for lb[i] == ub[i] dims, dx=0 */
 	       xcur[j] = x[j];
+	       any_fixed = 1;
 	       continue;
 	  }
 
-	  u = dfdx[j];
-	  v = fabs(dfdx[j]) * sigma[j] + 0.5 * rho;
-	  for (i = 0; i < m; ++i) if (!nlopt_isnan(fcval[i])) {
-	       u += dfcdx[i*n + j] * y[i];
-	       v += (fabs(dfcdx[i*n + j]) * sigma[j] + 0.5 * rhoc[i]) * y[i];
-	  }
-	  u *= (sigma2 = sqr(sigma[j]));
-	  dx = (u/v) / (-1 - sqrt(fabs(1 - sqr(u/(v*sigma[j])))));
+	  uj = u[j] * (sigma2 = sqr(sigma[j]));
+	  vj = v[j];
+	  dx = (uj/vj) / (-1 - sqrt(fabs(1 - sqr(uj/(vj*sigma[j])))));
 	  xcur[j] = x[j] + dx;
 	  if (xcur[j] > ub[j]) xcur[j] = ub[j];
 	  else if (xcur[j] < lb[j]) xcur[j] = lb[j];
@@ -116,17 +131,33 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 	  /* function value: */
 	  dx2 = dx * dx;
 	  denominv = 1.0 / (sigma2 - dx2);
-	  val += (u * dx + v * dx2) * denominv;
+	  val += (uj * dx + vj * dx2) * denominv;
 
-	  /* update gval, wval, gcval (approximant functions) */
+	  /* update gval, wval (approximant functions); gcval below */
 	  c = sigma2 * dx;
 	  d->gval += (dfdx[j] * c + (fabs(dfdx[j])*sigma[j] + 0.5*rho) * dx2)
 	       * denominv;
 	  d->wval += 0.5 * dx2 * denominv;
-	  for (i = 0; i < m; ++i) if (!nlopt_isnan(fcval[i]))
-	       gcval[i] += (dfcdx[i*n+j] * c + (fabs(dfcdx[i*n+j])*sigma[j]
-						+ 0.5*rhoc[i]) * dx2)
-		    * denominv;
+	  cs[j] = c;
+	  dx2s[j] = dx2;
+	  denominvs[j] = denominv;
+     }
+
+     /* update gcval, row by row of dfcdx as above */
+     for (i = 0; i < m; ++i) if (!nlopt_isnan(fcval[i])) {
+	  const double *dfcdxi = dfcdx + i*n;
+	  double rhoci = 0.5*rhoc[i], gc = gcval[i];
+	  if (any_fixed) {
+	       for (j = 0; j < n; ++j) if (sigma[j] != 0)
+		    gc += (dfcdxi[j] * cs[j] + (fabs(dfcdxi[j])*sigma[j] + rhoci)
+			   * dx2s[j]) * denominvs[j];
+	  }
+	  else {
+	       for (j = 0; j < n; ++j)
+		    gc += (dfcdxi[j] * cs[j] + (fabs(dfcdxi[j])*sigma[j] + rhoci)
+			   * dx2s[j]) * denominvs[j];
+	  }
+	  gcval[i] = gc;
      }
 
      /* gradient is easy to compute: since we are at a minimum x (dval/dx=0),
@@ -170,7 +201,7 @@ nlopt_result mma_minimize(unsigned n, nlopt_func f, void *f_data,
                         nlopt_get_dimension(dual_opt), m);
          return NLOPT_INVALID_ARGS;
      }
-     sigma = (double *) malloc(sizeof(double) * (6*n + 2*m*n + m*7));
+     sigma = (double *) malloc(sizeof(double) * (11*n + 2*m*n + m*7));
      if (!sigma) return NLOPT_OUT_OF_MEMORY;
      dfdx = sigma + n;
      dfdx_cur = dfdx + n;
@@ -186,6 +217,7 @@ nlopt_result mma_minimize(unsigned n, nlopt_func f, void *f_data,
      y = dual_ub + m;
      dfcdx = y + m;
      dfcdx_cur = dfcdx + m*n;
+     dd.work = dfcdx_cur + m*n;
 
      dd.n = n;
      dd.x = x;

@@ -72,6 +72,7 @@ typedef struct {
      nlopt_precond pre; void *pre_data;
      nlopt_precond *prec; void **prec_data; /* length = # constraints */
      double *scratch; /* length = 2*n */
+     double *work; /* length = 3*n, for dual_func */
 } dual_data;
 
 static double sqr(double x) { return x * x; }
@@ -87,8 +88,10 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
      const double *rhoc = d->rhoc, *fcval = d->fcval;
      double *xcur = d->xcur;
      double *gcval = d->gcval;
+     double *v = d->work, *dxs = v + n, *dx2sigs = dxs + n;
      unsigned i, j;
-     double val;
+     int any_fixed = 0;
+     double val, u;
 
      d->count++;
 
@@ -97,29 +100,40 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
      for (i = 0; i < m; ++i)
 	  val += y[i] * (gcval[i] = fcval[i]);
 
+     /* u and v as defined below.  u does not depend on j.  The sums for v
+	run over the rows of the m-by-n array dfcdx, so they are done row by
+	row (along the contiguous dimension) for all j at once, in the same
+	order for each j. */
+     u = rho;
+     for (i = 0; i < m; ++i)
+	  u += rhoc[i] * y[i];
+     for (j = 0; j < n; ++j)
+	  v[j] = dfdx[j];
+     for (i = 0; i < m; ++i) {
+	  const double *dfcdxi = dfcdx + i*n;
+	  double yi = y[i];
+	  for (j = 0; j < n; ++j)
+	       v[j] += dfcdxi[j] * yi;
+     }
+
      for (j = 0; j < n; ++j) {
-	  double u, v, dx, sigma2, dx2, dx2sig;
+	  double dx, sigma2, dx2, dx2sig;
 
 	  /* first, compute xcur[j] = x+dx for y.  Because this objective is
 	     separable, we can minimize over x analytically, and the minimum
 	     dx is given by the solution of a linear equation
 	             u dx + v sigma^2 = 0, i.e. dx = -sigma^2 v/u
-	     where u and v are defined by the sums below.  However,
+	     where u and v are defined by the sums above.  However,
 	     we also have to check that |dx| <= sigma and that
 	     lb <= x+dx <= ub. */
 
 	  if (sigma[j] == 0) { /* special case for lb[i] == ub[i] dims, dx=0 */
 	       xcur[j] = x[j];
+	       any_fixed = 1;
 	       continue;
 	  }
 
-	  u = rho;
-	  v = dfdx[j];
-	  for (i = 0; i < m; ++i) {
-	       u += rhoc[i] * y[i];
-	       v += dfcdx[i*n + j] * y[i];
-	  }
-	  dx = -(sigma2 = sqr(sigma[j])) * v/u;
+	  dx = -(sigma2 = sqr(sigma[j])) * v[j]/u;
 
 	  /* if dx is out of bounds, we are guaranteed by convexity
 	     that the minimum is at the bound on the side of dx */
@@ -131,13 +145,28 @@ static double dual_func(unsigned m, const double *y, double *grad, void *d_)
 
 	  /* function value: */
 	  dx2 = dx * dx;
-	  val += v * dx + 0.5 * u * dx2 / sigma2;
+	  val += v[j] * dx + 0.5 * u * dx2 / sigma2;
 
-	  /* update gval, wval, gcval (approximant functions) */
+	  /* update gval, wval (approximant functions); gcval below */
 	  d->gval += dfdx[j] * dx + rho * (dx2sig = 0.5*dx2/sigma2);
 	  d->wval += dx2sig;
-	  for (i = 0; i < m; ++i)
-	       gcval[i] += dfcdx[i*n+j] * dx + rhoc[i] * dx2sig;
+	  dxs[j] = dx;
+	  dx2sigs[j] = dx2sig;
+     }
+
+     /* update gcval, row by row of dfcdx as above */
+     for (i = 0; i < m; ++i) {
+	  const double *dfcdxi = dfcdx + i*n;
+	  double rhoci = rhoc[i], gc = gcval[i];
+	  if (any_fixed) {
+	       for (j = 0; j < n; ++j) if (sigma[j] != 0)
+		    gc += dfcdxi[j] * dxs[j] + rhoci * dx2sigs[j];
+	  }
+	  else {
+	       for (j = 0; j < n; ++j)
+		    gc += dfcdxi[j] * dxs[j] + rhoci * dx2sigs[j];
+	  }
+	  gcval[i] = gc;
      }
 
      /* gradient is easy to compute: since we are at a minimum x (dval/dx=0),
@@ -243,7 +272,7 @@ nlopt_result ccsa_quadratic_minimize(
                         nlopt_get_dimension(dual_opt), m);
          return NLOPT_INVALID_ARGS;
      }
-     sigma = (double *) malloc(sizeof(double) * (6*n + 2*m*n + m*7));
+     sigma = (double *) malloc(sizeof(double) * (9*n + 2*m*n + m*7));
      if (!sigma) return NLOPT_OUT_OF_MEMORY;
      dfdx = sigma + n;
      dfdx_cur = dfdx + n;
@@ -259,6 +288,7 @@ nlopt_result ccsa_quadratic_minimize(
      y = dual_ub + m;
      dfcdx = y + m;
      dfcdx_cur = dfcdx + m*n;
+     dd.work = dfcdx_cur + m*n;
 
      dd.n = n;
      dd.x = x;
