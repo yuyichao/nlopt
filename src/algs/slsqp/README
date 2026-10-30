@@ -63,6 +63,13 @@ constraints), DGELSY's O(n^3) QR factorization, whose reflectors are all
 the identity, is skipped: the rank estimate (DLAIC1) and triangular solve
 of DGELSY are done directly, with bit-identical results, and DGELSY is
 still used whenever it would rescale or the matrix is rank deficient.
+NNLS computes its dual vector with one DGEMV and applies each new
+Householder transformation with DLARF on whole column blocks, instead of
+one DDOT and one single-column DLARF per column; the columns already in
+the solution set are zero in the rows involved.  With many constraints
+this removes most of the BLAS call overhead (about 14% of the run time on
+a problem with ~1500 constraints); the summation order changes, so
+results differ from SciPy's in the last bits.
 
 The BLAS/LAPACK library is chosen at configure time with the CMake
 option NLOPT_BLAS: AUTO (default; use one if found), ON (require one),
